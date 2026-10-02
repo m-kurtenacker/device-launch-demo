@@ -1,0 +1,232 @@
+#[import(cc = "thorin")] fn cuda_launch_device(_dev: i32, _grid: (i32, i32, i32), _block: (i32, i32, i32), _body: fn() -> ()) -> ();
+
+fn @round_up(n : i32, r : i32) -> i32 {
+    (n + (r - 1)) / r * r
+}
+
+struct Point {
+    x : f32,
+    y : f32
+}
+
+fn @within_one_pixel (a : Point, b : Point, c : Point, width : f32, height : f32, x_min : f32, x_max : f32, y_min : f32, y_max : f32) {
+    let pixel_x_a = ((a.x - x_min as f32) / (x_max - x_min) as f32 * width as f32) as i32;
+    let pixel_y_a = ((a.y - y_min as f32) / (y_max - y_min) as f32 * height as f32) as i32;
+
+    let pixel_x_b = ((b.x - x_min as f32) / (x_max - x_min) as f32 * width as f32) as i32;
+    let pixel_y_b = ((b.y - y_min as f32) / (y_max - y_min) as f32 * height as f32) as i32;
+
+    let pixel_x_c = ((c.x - x_min as f32) / (x_max - x_min) as f32 * width as f32) as i32;
+    let pixel_y_c = ((c.y - y_min as f32) / (y_max - y_min) as f32 * height as f32) as i32;
+
+    pixel_x_a == pixel_x_b && pixel_x_b == pixel_x_c && pixel_y_a == pixel_y_b && pixel_y_b == pixel_y_c
+}
+
+fn @center_point(a : Point, b : Point) -> Point {
+    let x = (a.x + b.x) / 2.0;
+    let y = (a.y + b.y) / 2.0;
+
+    Point { x = x, y = y }
+}
+
+
+fn @cross2d(a : Point, b : Point) -> f32 {
+    a.x * b.y - a.y * b.x
+}
+
+fn @is_inside_edge(e0 : Point, e1 : Point, p : Point) -> bool {
+    let ep1 = Point { x = p.x - e0.x, y = p.y - e0.y };
+    let ep2 = Point { x = p.x - e1.x, y = p.y - e1.y };
+    cross2d(ep1, ep2) > 0
+}
+
+fn draw_point(a : Point, buf : &mut [i8], width : i32, height : i32, x_min : f64, x_max : f64, y_min : f64, y_max : f64) -> () {
+    let px = ((a.x - x_min as f32) / (x_max - x_min) as f32 * width as f32) as i32;
+    let py = ((a.y - y_min as f32) / (y_max - y_min) as f32 * height as f32) as i32;
+
+    if 0 <= px && px < width && 0 <= py && py < height {
+        let pixel = bitcast[&mut [u8]](&mut buf((py * width + px) * 3));
+
+        pixel(0) = 255;
+        pixel(1) = 0;
+        pixel(2) = 0;
+    }
+}
+
+fn fill_triangle(a : Point, b : Point, c : Point, buf : &mut [i8], width : i32, height : i32, x_min : f64, x_max : f64, y_min : f64, y_max : f64) -> () {
+    for px in range(0, width) {
+        for py in range(0, height) {
+            let x = x_min as f32 + (x_max - x_min) as f32 * px as f32 / width as f32;
+            let y = y_min as f32 + (y_max - y_min) as f32 * py as f32 / height as f32;
+
+            let p = Point { x = x, y = y };
+
+            if is_inside_edge(b, a, p) && is_inside_edge(c, b, p) && is_inside_edge(a, c, p) {
+                let pixel = bitcast[&mut [u8]](&mut buf((py * width + px) * 3));
+
+                pixel(0) = 0;
+                pixel(1) = 0;
+                pixel(2) = 255;
+            }
+        }
+    }
+
+    draw_point(a, buf, width, height, x_min, x_max, y_min, y_max);
+    draw_point(b, buf, width, height, x_min, x_max, y_min, y_max);
+    draw_point(c, buf, width, height, x_min, x_max, y_min, y_max);
+}
+
+fn render_triangle(a : Point, b : Point, c : Point, buf : &mut [i8], width : i32, height : i32, x_min : f64, x_max : f64, y_min : f64, y_max : f64, limit : i32) -> () {
+    if within_one_pixel(a, b, c, width as f32, height as f32, x_min as f32, x_max as f32, y_min as f32, y_max as f32) {
+        let px = ((a.x - x_min as f32) / (x_max - x_min) as f32 * width as f32) as i32;
+        let py = ((a.y - y_min as f32) / (y_max - y_min) as f32 * height as f32) as i32;
+
+        if 0 <= px && px < width && 0 <= py && py < height {
+            let pixel = bitcast[&mut [u8]](&mut buf((py * width + px) * 3));
+
+            pixel(0) = 255;
+            pixel(1) = 0;
+            pixel(2) = 0;
+        }
+    } else if limit == 0 {
+        fill_triangle(a, b, c, buf, width, height, x_min, x_max, y_min, y_max);
+    } else {
+        let cab = center_point(a, b);
+        let cac = center_point(a, c);
+        let cbc = center_point(b, c);
+
+        render_triangle(a, cab, cac, buf, width, height, x_min, x_max, y_min, y_max, limit - 1);
+        render_triangle(b, cbc, cab, buf, width, height, x_min, x_max, y_min, y_max, limit - 1);
+        render_triangle(c, cac, cbc, buf, width, height, x_min, x_max, y_min, y_max, limit - 1);
+    }
+}
+
+#[export]
+fn make_image(buf : &mut [i8], width : i32, height : i32, x_min : f64, x_max : f64, y_min : f64, y_max : f64) -> () {
+
+    //let acc = cuda_accelerator(0);
+
+    //let pixel_cuda_buffer = acc.alloc(sizeof[u8]() * width as i64 * height as i64 * 3 : i64);
+    //let pixel_cuda = bitcast[&mut [u8]](pixel_cuda_buffer.data);
+
+    for x in range(0, width) {
+        for y in range(0, height) {
+            let pixel = bitcast[&mut [u8]](&mut buf((y * width + x) * 3));
+
+            pixel(0) = 0;
+            pixel(1) = 255;
+            pixel(2) = 0;
+        }
+    }
+
+    let a = Point { x = 0, y = 0 };
+    let b = Point { x = -1, y = 1.414 };
+    let c = Point { x = 1, y = 1.414 };
+
+    render_triangle(a, b, c, buf, width, height, x_min, x_max, y_min, y_max, 5);
+
+    // Scale max_iter with zoom depth so detail is preserved when zooming in
+    //let extent = x_max - x_min;
+    //let mut max_iter_tmp = (256 + 128 * math_builtins::log2(3.0 / extent)) as i32;
+
+    //if (max_iter_tmp < 256) {
+    //    max_iter_tmp = 256;
+    //}
+    //if (max_iter_tmp > 2048) {
+    //    max_iter_tmp = 2048;
+    //}
+
+    //let max_iter = max_iter_tmp;
+
+    //Mandelbrot, F64
+    /*for work_item in acc.exec((width_grid, height_grid, 1), (8, 8, 1)) {
+        let px = work_item.gidx();
+        let py = work_item.gidy();
+
+        if (px < width && py < height) {
+            let cr = x_min + (x_max - x_min) * (px as f64) / (width as f64);
+            let ci = y_min + (y_max - y_min) * (py as f64) / (height as f64);
+            let mut zr = 0.0 : f64;
+            let mut zi = 0.0 : f64;
+            let mut iter = 0;
+
+            while (zr*zr + zi*zi <= 4.0 && iter < max_iter) {
+                let tmp = zr*zr - zi*zi + cr;
+                zi = 2.0*zr*zi + ci;
+                zr = tmp;
+                ++iter;
+            }
+
+            let pixel = bitcast[&mut [u8]](&mut pixel_cuda((py * width + px) * 3));
+            if (iter == max_iter) {
+                pixel(0) = 0;
+                pixel(1) = 0;
+                pixel(2) = 0;
+            } else {
+                let t = (iter as f64) / (max_iter as f64);
+                pixel(0) = (9   * (1-t) * t*t*t * 255) as u8;
+                pixel(1) = (15  * (1-t)*(1-t) * t*t * 255) as u8;
+                pixel(2) = (8.5 * (1-t)*(1-t)*(1-t) * t * 255) as u8;
+            }
+        }
+    }//*/
+
+    //Mandelbrot, F64
+    /*let width_grid = round_up(width, 8);
+    let height_grid = round_up(height, 8);
+
+    for work_item in acc.exec((width_grid, height_grid, 1), (8, 8, 1)) {
+        let px = work_item.gidx();
+        let py = work_item.gidy();
+
+        if (px < width && py < height) {
+            let cr = x_min as f32 + (x_max - x_min) as f32 * (px as f32) / (width as f32);
+            let ci = y_min as f32 + (y_max - y_min) as f32 * (py as f32) / (height as f32);
+            let mut zr = 0.0 : f32;
+            let mut zi = 0.0 : f32;
+            let mut iter = 0;
+
+            while (zr*zr + zi*zi <= 4.0 && iter < max_iter) {
+                let tmp = zr*zr - zi*zi + cr;
+                zi = 2.0*zr*zi + ci;
+                zr = tmp;
+                ++iter;
+            }
+
+            let pixel = bitcast[&mut [u8]](&mut pixel_cuda((py * width + px) * 3));
+            if (iter == max_iter) {
+                pixel(0) = 0;
+                pixel(1) = 0;
+                pixel(2) = 0;
+            } else {
+                let t = (iter as f32) / (max_iter as f32);
+                pixel(0) = (9   * (1-t) * t*t*t * 255) as u8;
+                pixel(1) = (15  * (1-t)*(1-t) * t*t * 255) as u8;
+                pixel(2) = (8.5 * (1-t)*(1-t)*(1-t) * t * 255) as u8;
+            }
+        }
+    }//*/
+
+    //runtime_copy(pixel_cuda_buffer.device, pixel_cuda_buffer.data, 0, 0, buf, 0, pixel_cuda_buffer.size);
+    //release(pixel_cuda_buffer);
+}
+
+//    cuda(0, (4, 1, 1), (2, 1, 1), || {
+//        cuda_vprintf("Hallo I bims 1 host launch kernel!\n", bitcast[&[u8]](&(0)));
+//
+//        let gidx = cuda_threadIdx_x() + cuda_blockDim_x() * cuda_blockIdx_x();
+//
+//        cuda_launch_device(0, (2, 1, 1), (1, 1, 1), || {
+//            let gid2x = cuda_threadIdx_x() + cuda_blockDim_x() * cuda_blockIdx_x();
+//            cuda_vprintf("Un I bim %d device launch kernel %d.\n", bitcast[&[u8]](&(gidx, gid2x)));
+//        });
+//
+//        cuda_launch_device(0, (2, 1, 1), (1, 1, 1), || {
+//            let gid2x = cuda_threadIdx_x() + cuda_blockDim_x() * cuda_blockIdx_x();
+//            cuda_vprintf("Un I bim %d device launch kernel %d.\n", bitcast[&[u8]](&(gidx, gid2x)));
+//        });
+//
+//        /*cuda(0, (4, 2, 1), (2, 2, 1), || {
+//            cuda_vprintf("This works too!🎉\n", bitcast[&[u8]](&(0)));
+//        });*/
+//    });
