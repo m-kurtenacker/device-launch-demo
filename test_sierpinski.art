@@ -1,0 +1,326 @@
+#[import(cc = "thorin")] fn cuda_launch_device(_dev: i32, _grid: (i32, i32, i32), _block: (i32, i32, i32), _body: fn() -> ()) -> ();
+
+fn @round_up(n : i32, r : i32) -> i32 {
+    (n + (r - 1)) / r * r
+}
+
+struct Point {
+    x : f32,
+    y : f32
+}
+
+struct Triangle {
+    a : Point,
+    b : Point,
+    c : Point
+}
+
+fn @within_one_pixel (a : Point, b : Point, c : Point, width : i32, height : i32, x_min : f64, x_max : f64, y_min : f64, y_max : f64) {
+    let pixel_x_a = ((a.x - x_min as f32) / (x_max - x_min) as f32 * width as f32) as i32;
+    let pixel_y_a = ((a.y - y_min as f32) / (y_max - y_min) as f32 * height as f32) as i32;
+
+    let pixel_x_b = ((b.x - x_min as f32) / (x_max - x_min) as f32 * width as f32) as i32;
+    let pixel_y_b = ((b.y - y_min as f32) / (y_max - y_min) as f32 * height as f32) as i32;
+
+    let pixel_x_c = ((c.x - x_min as f32) / (x_max - x_min) as f32 * width as f32) as i32;
+    let pixel_y_c = ((c.y - y_min as f32) / (y_max - y_min) as f32 * height as f32) as i32;
+
+    let dist =
+          (pixel_x_a - pixel_x_b) * (pixel_x_a - pixel_x_b)
+        + (pixel_y_a - pixel_y_b) * (pixel_y_a - pixel_y_b)
+        + (pixel_x_b - pixel_x_c) * (pixel_x_b - pixel_x_c)
+        + (pixel_y_b - pixel_y_c) * (pixel_y_b - pixel_y_c)
+        + (pixel_x_a - pixel_x_c) * (pixel_x_a - pixel_x_c)
+        + (pixel_y_a - pixel_y_c) * (pixel_y_a - pixel_y_c);
+
+    dist < 6
+
+    //TODO : The hell, why does this not work. At some point, the pixels should come close enough.
+    //(pixel_x_a == pixel_x_b) && (pixel_x_b == pixel_x_c) && (pixel_y_a == pixel_y_b) && (pixel_y_b == pixel_y_c)
+}
+
+fn @center_point(a : Point, b : Point) -> Point {
+    let x = (a.x + b.x) / 2.0;
+    let y = (a.y + b.y) / 2.0;
+
+    Point { x = x, y = y }
+}
+
+
+fn @cross2d(a : Point, b : Point) -> f32 {
+    a.x * b.y - a.y * b.x
+}
+
+fn @is_inside_edge(e0 : Point, e1 : Point, p : Point) -> bool {
+    let ep1 = Point { x = p.x - e0.x, y = p.y - e0.y };
+    let ep2 = Point { x = p.x - e1.x, y = p.y - e1.y };
+    cross2d(ep1, ep2) > 0
+}
+
+fn @draw_point(a : Point, buf : &mut [i8], width : i32, height : i32, x_min : f64, x_max : f64, y_min : f64, y_max : f64) -> () {
+    let px = ((a.x - x_min as f32) / (x_max - x_min) as f32 * width as f32) as i32;
+    let py = ((a.y - y_min as f32) / (y_max - y_min) as f32 * height as f32) as i32;
+
+    if 0 <= px && px < width && 0 <= py && py < height {
+        let pixel = bitcast[&mut [u8]](&mut buf((py * width + px) * 3));
+
+        pixel(0) = 255;
+        pixel(1) = 0;
+        pixel(2) = 0;
+    }
+}
+
+fn @fill_triangle(acc : Accelerator, a : Point, b : Point, c : Point, buf : &mut [i8], width : i32, height : i32, x_min : f64, x_max : f64, y_min : f64, y_max : f64) -> () {
+    for work_item in acc.exec((width, 1, 1), (32, 1, 1)) {
+        let px = work_item.gidx();
+    //for px in range(0, width) {
+
+        for py in range(0, height) {
+            let x = x_min as f32 + (x_max - x_min) as f32 * px as f32 / width as f32;
+            let y = y_min as f32 + (y_max - y_min) as f32 * py as f32 / height as f32;
+
+            let p = Point { x = x, y = y };
+
+            if is_inside_edge(b, a, p) && is_inside_edge(c, b, p) && is_inside_edge(a, c, p) {
+                let pixel = bitcast[&mut [u8]](&mut buf((py * width + px) * 3));
+
+                pixel(0) = 0;
+                pixel(1) = 0;
+                pixel(2) = 255;
+            }
+        }
+    }
+}
+fn @offscreen(a : Point, b : Point, c : Point, x_min : f64, x_max : f64, y_min : f64, y_max : f64) -> bool {
+       a.x <= x_min as f32 && b.x <= x_min as f32 && c.x <= x_min as f32
+    || a.x > x_max as f32 && b.x > x_max as f32 && c.x > x_max as f32
+    || a.y <= y_min as f32 && b.y <= y_min as f32 && c.y <= y_min as f32
+    || a.y > y_max as f32 && b.y > y_max as f32 && c.y > y_max as f32
+}
+
+#[export]
+fn make_image(buf : &mut [i8], width : i32, height : i32, x_min : f64, x_max : f64, y_min : f64, y_max : f64) -> () {
+    let acc = cuda_accelerator(0);
+
+    let pixel_cuda_buffer = acc.alloc(sizeof[u8]() * width as i64 * height as i64 * 3 : i64);
+    let pixel_cuda = bitcast[&mut [i8]](pixel_cuda_buffer.data);
+
+    for work_item in acc.exec((width, height, 1), (8, 8, 1)) {
+        let x = work_item.gidx();
+        let y = work_item.gidy();
+
+        let pixel = bitcast[&mut [u8]](&mut pixel_cuda((y * width + x) * 3));
+
+        pixel(0) = 0;
+        pixel(1) = 255;
+        pixel(2) = 0;
+    }
+
+    let a = Point { x = 0, y = 0 };
+    let b = Point { x = -1, y = 1.414 };
+    let c = Point { x = 1, y = 1.414 };
+
+    for _work_item in acc.exec((1, 1, 1), (1, 1, 1)) {
+        fn render_triangle(a : Point, b : Point, c : Point, limit : i32) -> () {
+            if offscreen(a, b, c, x_min, x_max, y_min, y_max) {
+                return()
+            }
+
+            if within_one_pixel(a, b, c, width, height, x_min, x_max, y_min, y_max) {
+                /*for id in range(0, 3) {
+                //for work_item in acc.exec((3, 1, 1), (1, 1, 1)) {
+                //    let id = work_item.gidx();
+
+                    let target = [a, b, c](id);
+
+                    draw_point(target, pixel_cuda, width, height, x_min, x_max, y_min, y_max);
+                }*/
+
+                draw_point(a, pixel_cuda, width, height, x_min, x_max, y_min, y_max);
+            } else if limit <= 0 {
+                fill_triangle(acc, a, b, c, pixel_cuda, width, height, x_min, x_max, y_min, y_max);
+
+                /*for id in range(0, 3) {
+                //for work_item in acc.exec((3, 1, 1), (1, 1, 1)) {
+                //    let id = work_item.gidx();
+
+                    let target = [a, b, c](id);
+
+                    draw_point(target, pixel_cuda, width, height, x_min, x_max, y_min, y_max);
+                }//*/
+            } else if limit >= 3 {
+                fn @child_triangles(t : Triangle) -> (Triangle, Triangle, Triangle) {
+                    let cab = center_point(t.a, t.b);
+                    let cac = center_point(t.a, t.c);
+                    let cbc = center_point(t.b, t.c);
+
+                    let ta = Triangle{a = t.a, b = cab, c = cac};
+                    let tb = Triangle{a = t.b, b = cbc, c = cab};
+                    let tc = Triangle{a = t.c, b = cac, c = cbc};
+
+                    (ta, tb, tc)
+                }
+
+                let tp = Triangle{a = a, b = b, c = c};
+                let (ta, tb, tc) = child_triangles(tp);
+
+                let (taa, tab, tac) = child_triangles(ta);
+                let (tba, tbb, tbc) = child_triangles(tb);
+                let (tca, tcb, tcc) = child_triangles(tc);
+
+                let (taaa, taab, taac) = child_triangles(taa);
+                let (taba, tabb, tabc) = child_triangles(tab);
+                let (taca, tacb, tacc) = child_triangles(tac);
+                let (tbaa, tbab, tbac) = child_triangles(tba);
+                let (tbba, tbbb, tbbc) = child_triangles(tbb);
+                let (tbca, tbcb, tbcc) = child_triangles(tbc);
+                let (tcaa, tcab, tcac) = child_triangles(tca);
+                let (tcba, tcbb, tcbc) = child_triangles(tcb);
+                let (tcca, tccb, tccc) = child_triangles(tcc);
+
+                for work_item in acc.exec((27, 1, 1), (27, 1, 1)) {
+                    let id = work_item.gidx();
+                //for id in range(0, 27) {
+
+                    let target = [taaa, taab, taac, taba, tabb, tabc, taca, tacb, tacc, tbaa, tbab, tbac, tbba, tbbb, tbbc, tbca, tbcb, tbcc, tcaa, tcab, tcac, tcba, tcbb, tcbc, tcca, tccb, tccc](id);
+
+                    render_triangle(target.a, target.b, target.c, limit - 3);
+                }
+            } else if limit >= 2 {
+                fn @child_triangles(t : Triangle) -> (Triangle, Triangle, Triangle) {
+                    let cab = center_point(t.a, t.b);
+                    let cac = center_point(t.a, t.c);
+                    let cbc = center_point(t.b, t.c);
+
+                    let ta = Triangle{a = t.a, b = cab, c = cac};
+                    let tb = Triangle{a = t.b, b = cbc, c = cab};
+                    let tc = Triangle{a = t.c, b = cac, c = cbc};
+
+                    (ta, tb, tc)
+                }
+
+                let tp = Triangle{a = a, b = b, c = c};
+                let (ta, tb, tc) = child_triangles(tp);
+
+                let (taa, tab, tac) = child_triangles(ta);
+                let (tba, tbb, tbc) = child_triangles(tb);
+                let (tca, tcb, tcc) = child_triangles(tc);
+
+                for work_item in acc.exec((9, 1, 1), (9, 1, 1)) {
+                    let id = work_item.gidx();
+                //for id in range(0, 9) {
+
+                    let target = [taa, tab, tac, tba, tbb, tbc, tca, tcb, tcc](id);
+
+                    render_triangle(target.a, target.b, target.c, limit - 2);
+                }
+            } else {
+                let cab = center_point(a, b);
+                let cac = center_point(a, c);
+                let cbc = center_point(b, c);
+
+                //for id in range(0, 3) {
+                for work_item in acc.exec((3, 1, 1), (3, 1, 1)) {
+                    let id = work_item.gidx();
+
+                    let (pa, pb, pc) = match id {
+                        0 => (a, cab, cac),
+                        1 => (b, cbc, cab),
+                        _ => (c, cac, cbc),
+                    };
+
+                    render_triangle(pa, pb, pc, limit - 1);
+                }
+            }
+        }
+
+        render_triangle(a, b, c, 20);
+    }
+
+    //acc.sync();
+
+    // Scale max_iter with zoom depth so detail is preserved when zooming in
+    //let extent = x_max - x_min;
+    //let mut max_iter_tmp = (256 + 128 * math_builtins::log2(3.0 / extent)) as i32;
+
+    //if (max_iter_tmp < 256) {
+    //    max_iter_tmp = 256;
+    //}
+    //if (max_iter_tmp > 2048) {
+    //    max_iter_tmp = 2048;
+    //}
+
+    //let max_iter = max_iter_tmp;
+
+    //Mandelbrot, F64
+    /*for work_item in acc.exec((width_grid, height_grid, 1), (8, 8, 1)) {
+        let px = work_item.gidx();
+        let py = work_item.gidy();
+
+        if (px < width && py < height) {
+            let cr = x_min + (x_max - x_min) * (px as f64) / (width as f64);
+            let ci = y_min + (y_max - y_min) * (py as f64) / (height as f64);
+            let mut zr = 0.0 : f64;
+            let mut zi = 0.0 : f64;
+            let mut iter = 0;
+
+            while (zr*zr + zi*zi <= 4.0 && iter < max_iter) {
+                let tmp = zr*zr - zi*zi + cr;
+                zi = 2.0*zr*zi + ci;
+                zr = tmp;
+                ++iter;
+            }
+
+            let pixel = bitcast[&mut [u8]](&mut pixel_cuda((py * width + px) * 3));
+            if (iter == max_iter) {
+                pixel(0) = 0;
+                pixel(1) = 0;
+                pixel(2) = 0;
+            } else {
+                let t = (iter as f64) / (max_iter as f64);
+                pixel(0) = (9   * (1-t) * t*t*t * 255) as u8;
+                pixel(1) = (15  * (1-t)*(1-t) * t*t * 255) as u8;
+                pixel(2) = (8.5 * (1-t)*(1-t)*(1-t) * t * 255) as u8;
+            }
+        }
+    }//*/
+
+    //Mandelbrot, F64
+    /*let width_grid = round_up(width, 8);
+    let height_grid = round_up(height, 8);
+
+    for work_item in acc.exec((width_grid, height_grid, 1), (8, 8, 1)) {
+        let px = work_item.gidx();
+        let py = work_item.gidy();
+
+        if (px < width && py < height) {
+            let cr = x_min as f32 + (x_max - x_min) as f32 * (px as f32) / (width as f32);
+            let ci = y_min as f32 + (y_max - y_min) as f32 * (py as f32) / (height as f32);
+            let mut zr = 0.0 : f32;
+            let mut zi = 0.0 : f32;
+            let mut iter = 0;
+
+            while (zr*zr + zi*zi <= 4.0 && iter < max_iter) {
+                let tmp = zr*zr - zi*zi + cr;
+                zi = 2.0*zr*zi + ci;
+                zr = tmp;
+                ++iter;
+            }
+
+            let pixel = bitcast[&mut [u8]](&mut pixel_cuda((py * width + px) * 3));
+            if (iter == max_iter) {
+                pixel(0) = 0;
+                pixel(1) = 0;
+                pixel(2) = 0;
+            } else {
+                let t = (iter as f32) / (max_iter as f32);
+                pixel(0) = (9   * (1-t) * t*t*t * 255) as u8;
+                pixel(1) = (15  * (1-t)*(1-t) * t*t * 255) as u8;
+                pixel(2) = (8.5 * (1-t)*(1-t)*(1-t) * t * 255) as u8;
+            }
+        }
+    }//*/
+
+    runtime_copy(pixel_cuda_buffer.device, pixel_cuda_buffer.data, 0, 0, buf, 0, pixel_cuda_buffer.size);
+    release(pixel_cuda_buffer);
+}

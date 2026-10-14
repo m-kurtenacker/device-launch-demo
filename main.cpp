@@ -5,8 +5,8 @@
 #include <cmath>
 #include <vector>
 
-static const int WIDTH  = 800;
-static const int HEIGHT = 600;
+static const int WIDTH  = 1600;
+static const int HEIGHT = 1200;
 
 extern "C" void make_image(uint8_t* buf, int width, int height,
                 double x_min, double x_max, double y_min, double y_max);
@@ -105,7 +105,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, texture, nullptr, nullptr);
         SDL_RenderPresent(renderer);
-        SDL_Delay(16);
+        //SDL_Delay(16);
     }
 
     SDL_DestroyTexture(texture);
