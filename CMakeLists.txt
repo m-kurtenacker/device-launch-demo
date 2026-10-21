@@ -37,3 +37,8 @@ add_executable(mandelbrot_cuda_view main.cpp test_mandelbrot_cuda.cu)
 target_include_directories(mandelbrot_cuda_view PRIVATE ${SDL2_INCLUDE_DIRS})
 target_link_libraries(mandelbrot_cuda_view ${SDL2_LIBRARIES})
 set_target_properties(mandelbrot_cuda_view PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+
+add_executable(sierpinski_cuda_view main.cpp test_sierpinski_cuda.cu)
+target_include_directories(sierpinski_cuda_view PRIVATE ${SDL2_INCLUDE_DIRS})
+target_link_libraries(sierpinski_cuda_view ${SDL2_LIBRARIES})
+set_target_properties(sierpinski_cuda_view PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
