@@ -44,3 +44,48 @@ add_executable(sierpinski_cuda_view main.cpp test_sierpinski_cuda.cu)
 target_include_directories(sierpinski_cuda_view PRIVATE ${SDL2_INCLUDE_DIRS})
 target_link_libraries(sierpinski_cuda_view ${SDL2_LIBRARIES})
 set_target_properties(sierpinski_cuda_view PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# SYCL (Intel oneAPI) port. The SYCL translation unit is compiled with icpx
+# into a shared library, since the project's CXX compiler is not SYCL-capable.
+find_program(SYCL_COMPILER icpx HINTS /opt/intel/oneapi/compiler/latest/bin)
+find_program(DPCT_EXECUTABLE dpct)
+if (DPCT_EXECUTABLE)
+    get_filename_component(DPCT_BIN_DIR ${DPCT_EXECUTABLE} DIRECTORY)
+endif()
+find_path(DPCT_INCLUDE_DIR dpct/dpct.hpp HINTS ${DPCT_BIN_DIR}/../include)
+set(SYCL_TARGETS "" CACHE STRING "Value for -fsycl-targets (e.g. spir64_gen), empty for JIT")
+
+if (SYCL_COMPILER AND DPCT_INCLUDE_DIR)
+    get_filename_component(SYCL_COMPILER_DIR ${SYCL_COMPILER} DIRECTORY)
+    set(SYCL_FLAGS -fsycl)
+    if (SYCL_TARGETS)
+        list(APPEND SYCL_FLAGS -fsycl-targets=${SYCL_TARGETS})
+    endif()
+
+    # Builds lib<source>.so from a SYCL source with icpx and links it into a
+    # viewer executable built from main.cpp.
+    function(add_sycl_view target source)
+        set(lib ${CMAKE_CURRENT_BINARY_DIR}/lib${source}.so)
+        add_custom_command(
+            OUTPUT ${lib}
+            COMMAND ${SYCL_COMPILER} ${SYCL_FLAGS} -O3 -fPIC -shared
+                    -I${DPCT_INCLUDE_DIR}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/${source}.dp.cpp
+                    -o ${lib}
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${source}.dp.cpp
+            COMMENT "Compiling ${source}.dp.cpp with icpx"
+            VERBATIM)
+        add_custom_target(${source} DEPENDS ${lib})
+
+        add_executable(${target} main.cpp)
+        add_dependencies(${target} ${source})
+        target_include_directories(${target} PRIVATE ${SDL2_INCLUDE_DIRS})
+        target_link_libraries(${target} ${SDL2_LIBRARIES} ${lib})
+        set_target_properties(${target} PROPERTIES
+            BUILD_RPATH "${CMAKE_CURRENT_BINARY_DIR};${SYCL_COMPILER_DIR}/../lib")
+    endfunction()
+
+    add_sycl_view(mandelbrot_sycl_view test_mandelbrot_sycl)
+    add_sycl_view(sierpinski_sycl_view test_sierpinski_sycl)
+    add_sycl_view(sierpinski_sycl_persistent_view test_sierpinski_sycl_persistent)
+endif()
